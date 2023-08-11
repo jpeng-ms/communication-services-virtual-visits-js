@@ -3,6 +3,10 @@
 
 import { TeamsMeetingLinkLocator } from '@azure/communication-calling';
 import { AzureCommunicationTokenCredential, CommunicationUserIdentifier } from '@azure/communication-common';
+// import { HttpClient } from '@azure/core-rest-pipeline';
+
+import { PipelineRequest, SendRequest, PipelineResponse } from '@azure/core-rest-pipeline';
+
 import {
   CallWithChatComposite,
   CallWithChatAdapter,
@@ -18,10 +22,10 @@ import { getApplicationName, getApplicationVersion } from '../../utils/GetAppInf
 import { getChatThreadIdFromTeamsLink } from '../../utils/GetMeetingLink';
 import { fullSizeStyles } from '../../styles/Common.styles';
 import { callWithChatComponentStyles, meetingExperienceLogoStyles } from '../../styles/MeetingExperience.styles';
-import { createStubChatClient } from '../../utils/stubs/chat';
 import { Survey } from '../postcall/Survey';
-
 import { PostCallConfig } from '../../models/ConfigModel';
+import linkifyHtml from 'linkify-html';
+
 export interface TeamsMeetingExperienceProps {
   userId: CommunicationUserIdentifier;
   token: string;
@@ -179,25 +183,50 @@ const _createCustomAdapter = async (
 
   const threadId = getChatThreadIdFromTeamsLink(locator.meetingLink);
 
-  const chatClient = chatEnabled
-    ? createStatefulChatClient({
-        userId,
-        displayName,
-        endpoint,
-        credential
-      })
-    : createStubChatClient(userId, threadId);
-
   const callAgent = await callClient.createCallAgent(credential, { displayName });
-  const chatThreadClient = await chatClient.getChatThreadClient(threadId);
+
+  const policy = {
+    name: 'policy',
+    async sendRequest(request: PipelineRequest, next: SendRequest): Promise<PipelineResponse> {
+      if (request.method === 'POST' && request.url.includes('messages')) {
+        const json = await JSON.parse(request.body as string);
+        json.content = linkifyHtml(json.content, { defaultProtocol: 'https' });
+        json.type = 'html';
+        request.body = JSON.stringify(json);
+      }
+      return await next(request);
+    }
+  };
+
+  const chatClient = createStatefulChatClient(
+    {
+      userId,
+      displayName,
+      endpoint,
+      credential
+    },
+    {
+      chatClientOptions: {
+        additionalPolicies: [
+          {
+            policy: policy,
+            position: 'perCall'
+          }
+        ]
+      }
+    }
+  );
+  const chatThreadClient = chatClient.getChatThreadClient(threadId);
 
   await chatClient.startRealtimeNotifications();
 
-  return createAzureCommunicationCallWithChatAdapterFromClients({
+  const chatAdapter = await createAzureCommunicationCallWithChatAdapterFromClients({
     callClient,
     callAgent,
     callLocator: locator,
     chatClient,
-    chatThreadClient
+    chatThreadClient // must be from stateful chat client
   });
+
+  return chatAdapter;
 };
